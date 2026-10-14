@@ -1,0 +1,69 @@
+# ==============================================================================
+# 파일명: .github/workflows/deploy.yml
+# 설명: OIDC 기반 AWS 임시 인증 -> Terraform 배포 -> Docker 빌드 -> ECR 푸시 -> ECS 자동 배포
+# ==============================================================================
+
+name: "GitOps CI/CD Pipeline"
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+# [★실무 핵심 보안] OIDC STS 인증 토큰 발급을 위한 OIDC ID 토큰 쓰기 권한 부여
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: "Deploy Infrastructure & Application"
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. GitHub Repository 소스 코드 체크아웃
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. AWS OIDC Role 임시 인증 (영구 Access Key 없이 안전하게 인증)
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # [★실무 핵심] Phase 2에서 생성한 IAM Role ARN 참조 (환경변수 또는 Secrets 처리 가능)
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      # 3. 테라폼 CLI 설치
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      # 4. 테라폼 초기화 및 배포
+      - name: Terraform Init & Apply
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      # 5. Amazon ECR 로그인
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 6. Docker 이미지 빌드 및 ECR 푸시
+      - name: Build, Tag, and Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: cloudretail-gitops-dev-api
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # app 디렉터리가 존재할 경우 이미지 빌드 및 ECR 푸시 진행
+          if [ -d "app" ]; then
+            docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+            docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          else
+            echo "app 디렉터리가 없어 Docker 빌드를 건너땁니다."
+          fi
